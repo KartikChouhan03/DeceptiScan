@@ -12,7 +12,7 @@
 
 ## 🌟 Key Features
 
-### 💻 Premium Glassmorphic Dashboard
+### 💻 Premium Dashboard
 *   **Intuitive UI**: A sleek dark/light theme-adaptive pop-up window built with glassmorphism design principles.
 *   **Trust Score Gauge**: Visualizes seller/product reliability using an animated circular gauge.
 *   **Tabbed Analytics**:
