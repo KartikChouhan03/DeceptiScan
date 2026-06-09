@@ -1,0 +1,70 @@
+# =========================
+# Node / Plasmo
+# =========================
+node_modules/
+build/
+dist/
+out/
+.plasmo/
+
+# =========================
+# Python
+# =========================
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.local
+.env.*
+
+# =========================
+# Datasets
+# =========================
+extension/backend/dataset/
+extension/backend/datasets/
+
+# =========================
+# Trained Models / Checkpoints
+# =========================
+extension/backend/models/
+extension/backend/training/results/
+extension/backend/training/logs/
+*.pt
+*.bin
+*.safetensors
+*.pth
+
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# TypeScript
+# =========================
+*.tsbuildinfo
