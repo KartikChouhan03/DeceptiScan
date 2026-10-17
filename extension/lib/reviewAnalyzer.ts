@@ -9,6 +9,14 @@ export default function analyzeReviews(
   rating: string,
   reviewCount: string
 ): AnalysisResult {
+  if (!reviews || reviews.length === 0) {
+    return {
+      score: 0,
+      risk: "Awaiting Reviews",
+      signals: ["No reviews available to analyze"]
+    }
+  }
+
   let score = 100
 
   const signals: string[] = []

@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-10-18 01:29:34",
+  "hardware": {
+    "device": "cpu",
+    "gpu_name": "CPU",
+    "cuda_available": false
+  },
+  "model": "DeBERTa-v3-base fine-tuned sequence classifier",
+  "iterations_per_batch": 25,
+  "batch_benchmarks": {
+    "batch_1": {
+      "batch_size": 1,
+      "mean_batch_latency_ms": 73.14,
+      "median_batch_latency_ms": 71.41,
+      "p95_batch_latency_ms": 78.5,
+      "per_review_latency_ms": 73.14
+    },
+    "batch_4": {
+      "batch_size": 4,
+      "mean_batch_latency_ms": 107.18,
+      "median_batch_latency_ms": 106.66,
+      "p95_batch_latency_ms": 110.51,
+      "per_review_latency_ms": 26.8
+    },
+    "batch_8": {
+      "batch_size": 8,
+      "mean_batch_latency_ms": 155.89,
+      "median_batch_latency_ms": 155.92,
+      "p95_batch_latency_ms": 157.97,
+      "per_review_latency_ms": 19.49
+    },
+    "batch_16": {
+      "batch_size": 16,
+      "mean_batch_latency_ms": 229.84,
+      "median_batch_latency_ms": 227.88,
+      "p95_batch_latency_ms": 240.28,
+      "per_review_latency_ms": 14.37
+    },
+    "batch_32": {
+      "batch_size": 32,
+      "mean_batch_latency_ms": 384.82,
+      "median_batch_latency_ms": 382.57,
+      "p95_batch_latency_ms": 394.82,
+      "per_review_latency_ms": 12.03
+    }
+  },
+  "key_takeaways": {
+    "single_sample_latency_ms": 73.14,
+    "batch_8_per_review_ms": 19.49,
+    "batch_32_per_review_ms": 12.03
+  }
+}

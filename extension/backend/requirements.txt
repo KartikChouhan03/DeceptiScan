@@ -9,3 +9,4 @@ pandas
 sentencepiece
 protobuf
 tiktoken
+xgboost>=2.0.0

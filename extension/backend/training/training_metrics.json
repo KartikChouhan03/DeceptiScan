@@ -1,0 +1,93 @@
+{
+  "model_architecture": "microsoft/deberta-v3-base",
+  "task": "binary_sequence_classification",
+  "num_labels": 2,
+  "label_mapping": {
+    "0": "Genuine Review",
+    "1": "Fake / Suspicious Review"
+  },
+  "training_run_metadata": {
+    "num_train_epochs": 3,
+    "per_device_train_batch_size": 8,
+    "per_device_eval_batch_size": 8,
+    "learning_rate": 2e-5,
+    "weight_decay": 0.01,
+    "max_seq_length": 128,
+    "total_training_steps": 21498,
+    "best_step": 14332,
+    "best_epoch": 2.0,
+    "training_runtime_seconds": 3551.0,
+    "training_runtime_formatted": "59m 11s",
+    "device": "CUDA (NVIDIA GeForce RTX 4060 Laptop GPU)",
+    "mixed_precision": "fp16"
+  },
+  "epoch_history": [
+    {
+      "epoch": 1,
+      "training_loss": 0.3519,
+      "validation_loss": 0.332251,
+      "accuracy": 0.863801,
+      "f1": 0.887906,
+      "precision": 0.859191,
+      "recall": 0.918607
+    },
+    {
+      "epoch": 2,
+      "training_loss": 0.2913,
+      "validation_loss": 0.390862,
+      "accuracy": 0.86736,
+      "f1": 0.892179,
+      "precision": 0.8535,
+      "recall": 0.934529
+    },
+    {
+      "epoch": 3,
+      "training_loss": 0.1652,
+      "validation_loss": 0.558253,
+      "accuracy": 0.863034,
+      "f1": 0.889052,
+      "precision": 0.847796,
+      "recall": 0.934529
+    }
+  ],
+  "final_test_evaluation": {
+    "test_dataset_size": 14332,
+    "eval_loss": 0.390862,
+    "accuracy": 0.86736,
+    "f1_score": 0.892179,
+    "precision": 0.8535,
+    "recall": 0.934529,
+    "confusion_matrix": {
+      "true_negative": 4566,
+      "false_positive": 1350,
+      "false_negative": 551,
+      "true_positive": 7865
+    },
+    "classification_report": {
+      "genuine_class_0": {
+        "precision": 0.89,
+        "recall": 0.77,
+        "f1_score": 0.83,
+        "support": 5916
+      },
+      "fake_class_1": {
+        "precision": 0.85,
+        "recall": 0.93,
+        "f1_score": 0.89,
+        "support": 8416
+      },
+      "macro_avg": {
+        "precision": 0.87,
+        "recall": 0.85,
+        "f1_score": 0.86,
+        "support": 14332
+      },
+      "weighted_avg": {
+        "precision": 0.87,
+        "recall": 0.87,
+        "f1_score": 0.87,
+        "support": 14332
+      }
+    }
+  }
+}

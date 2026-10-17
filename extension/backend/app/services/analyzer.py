@@ -22,7 +22,10 @@ class DebertaDetector:
         self.model_dir = os.path.join(backend_dir, "models", "deberta-v3-detector")
         
         if not os.path.exists(self.model_dir):
-            raise FileNotFoundError(f"DeBERTa model directory not found at: {self.model_dir}")
+            raise FileNotFoundError(
+                f"DeBERTa model directory not found at: {self.model_dir}.\n"
+                "Please run 'python extension/backend/models/download_model.py' to download or verify weights."
+            )
             
         print(f"Loading DeBERTa-v3 tokenizer and model from: {self.model_dir} on device: {self.device}")
         
@@ -33,16 +36,17 @@ class DebertaDetector:
         self.model.eval()
         print("Model and tokenizer loaded successfully.")
 
-    def predict(self, texts: list[str]) -> list[dict]:
+    def predict(self, texts: list[str], batch_size: int = 16) -> list[dict]:
         results = []
         if not texts:
             return results
             
-        # Run inference in evaluation mode without tracking gradients
+        # Run inference in true batches to leverage multi-core/GPU parallelization
         with torch.no_grad():
-            for text in texts:
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i : i + batch_size]
                 inputs = self.tokenizer(
-                    text,
+                    batch_texts,
                     padding=True,
                     truncation=True,
                     max_length=128,
@@ -50,14 +54,15 @@ class DebertaDetector:
                 ).to(self.device)
                 
                 outputs = self.model(**inputs)
-                probs = torch.softmax(outputs.logits, dim=-1).cpu().numpy()[0]
-                pred_class = int(np.argmax(probs))
-                confidence = float(probs[pred_class])
+                probs = torch.softmax(outputs.logits, dim=-1).cpu().numpy()
+                pred_classes = np.argmax(probs, axis=1)
                 
-                results.append({
-                    "is_fake": pred_class == 1,
-                    "confidence": confidence,
-                    "genuine_prob": float(probs[0]),
-                    "fake_prob": float(probs[1])
-                })
+                for idx, pred_class in enumerate(pred_classes):
+                    conf = float(probs[idx][pred_class])
+                    results.append({
+                        "is_fake": int(pred_class) == 1,
+                        "confidence": conf,
+                        "genuine_prob": float(probs[idx][0]),
+                        "fake_prob": float(probs[idx][1])
+                    })
         return results

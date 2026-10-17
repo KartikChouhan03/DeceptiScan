@@ -85,29 +85,60 @@ function IndexPopup() {
 
   const theme = themeMode === "dark" ? darkTheme : lightTheme
 
-  // Load and test connection
-  const checkConnection = async (targetUrl: string) => {
-    try {
-      const response = await axios.get(`${targetUrl}/api/health`, { timeout: 2000 })
-      if (response.data?.status === "healthy") {
-        setIsApiConnected(true)
-        return true
-      }
-      setIsApiConnected(false)
-      return false
-    } catch {
-      setIsApiConnected(false)
-      return false
-    }
+  // Normalize target URL (strip trailing slashes, whitespace)
+  const normalizeUrl = (rawUrl: string): string => {
+    let clean = (rawUrl || "http://127.0.0.1:8000").trim()
+    return clean.replace(/\/+$/, "")
   }
 
-  // Request prediction from FastAPI
+  // Load and test connection with automatic 127.0.0.1 / localhost fallback
+  const checkConnection = async (targetUrl: string): Promise<boolean> => {
+    const cleanUrl = normalizeUrl(targetUrl)
+    const urlsToTry = [cleanUrl]
+    if (cleanUrl.includes("localhost")) {
+      urlsToTry.push(cleanUrl.replace("localhost", "127.0.0.1"))
+    } else if (cleanUrl.includes("127.0.0.1")) {
+      urlsToTry.push(cleanUrl.replace("127.0.0.1", "localhost"))
+    }
+
+    for (const url of urlsToTry) {
+      try {
+        const response = await fetch(`${url}/api/health`, {
+          method: "GET",
+          headers: { "Accept": "application/json" },
+          signal: AbortSignal.timeout(3000)
+        })
+        if (response.ok) {
+          const data = await response.json()
+          if (data?.status === "healthy") {
+            setIsApiConnected(true)
+            if (url !== cleanUrl) {
+              setApiUrl(url)
+              if (typeof chrome !== "undefined" && chrome.storage?.local) {
+                chrome.storage.local.set({ apiUrl: url })
+              }
+            }
+            return true
+          }
+        }
+      } catch (err) {
+        // try alternative url candidate
+      }
+    }
+    setIsApiConnected(false)
+    return false
+  }
+
+  // Request prediction from FastAPI backend
   const runModelAnalysis = async (reviewsToAnalyze: string[], targetUrl: string) => {
-    if (!reviewsToAnalyze || reviewsToAnalyze.length === 0) return
+    if (!reviewsToAnalyze || reviewsToAnalyze.length === 0) {
+      setIsAnalyzing(false)
+      return
+    }
     setIsAnalyzing(true)
-    
-    // Check connection first
-    const isOnline = await checkConnection(targetUrl)
+
+    const cleanUrl = normalizeUrl(targetUrl)
+    const isOnline = await checkConnection(cleanUrl)
     if (!isOnline) {
       setIsAnalyzing(false)
       setModelResult({
@@ -121,11 +152,21 @@ function IndexPopup() {
     }
 
     try {
-      const response = await axios.post(`${targetUrl}/api/analyze`, {
-        reviews: reviewsToAnalyze
-      }, { timeout: 12000 })
-      
-      const { score, risk, fake_count, details } = response.data
+      const response = await fetch(`${cleanUrl}/api/analyze`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ reviews: reviewsToAnalyze }),
+        signal: AbortSignal.timeout(30000)
+      })
+
+      if (!response.ok) {
+        throw new Error(`Server returned HTTP ${response.status}`)
+      }
+
+      const { score, risk, fake_count, details } = await response.json()
       setModelResult({
         score,
         risk,
@@ -134,7 +175,7 @@ function IndexPopup() {
         isAiPowered: true
       })
     } catch (error) {
-      console.error("AI inference request failed, utilizing heuristic fallback:", error)
+      console.error("[DeceptiScan] AI inference request failed, utilizing heuristic fallback:", error)
       setModelResult({
         score: 0,
         risk: "",
@@ -147,27 +188,80 @@ function IndexPopup() {
     }
   }
 
+  // Helper to strip Amazon site/review prefixes from titles
+  const cleanProductName = (name: string): string => {
+    if (!name) return ""
+    let clean = name.trim()
+    clean = clean.replace(/^Amazon\.[a-z.]+\s*[-:|]\s*Customer reviews\s*[-:|]\s*/i, "")
+    clean = clean.replace(/^Customer reviews\s*[-:|]\s*/i, "")
+    clean = clean.replace(/^Amazon\.[a-z.]+\s*[-:|]\s*/i, "")
+    clean = clean.replace(/\s*[-:|]\s*Amazon\.[a-z.]+$/i, "")
+    clean = clean.replace(/\s*[-:|]\s*Online Shopping.*$/i, "")
+    return clean.trim() || name.trim()
+  }
+
   // Scrape page dynamically via message parsing
   const handleReload = () => {
     if (typeof chrome === "undefined" || !chrome.tabs) return
     setIsScraping(true)
     setIsAnalyzing(true)
-    
+
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs[0]?.id) {
-        chrome.tabs.sendMessage(tabs[0].id, { action: "scrape" }, (response) => {
-          // Allow some time for content scripts to execute and write to storage
+      const activeTab = tabs?.[0]
+      if (!activeTab?.id) {
+        setIsScraping(false)
+        setIsAnalyzing(false)
+        return
+      }
+
+      chrome.tabs.sendMessage(activeTab.id, { action: "scrape" }, (response) => {
+        if (chrome.runtime.lastError) {
+          // Content script not running on this tab (e.g. Google, new tab, non-supported domain)
+          console.warn("[DeceptiScan] Content script communication:", chrome.runtime.lastError.message)
+          setProduct("No Product Found")
+          setReviews([])
+          setModelResult(null)
+          setIsScraping(false)
+          setIsAnalyzing(false)
+          return
+        }
+
+        if (response && response.status === "no_product") {
+          setProduct("No Product Found")
+          setReviews([])
+          setModelResult(null)
+          setIsScraping(false)
+          setIsAnalyzing(false)
+          return
+        }
+
+        if (response && response.product && response.product !== "No Product Found") {
+          const cleanName = cleanProductName(response.product)
+          setProduct(cleanName)
+          if (response.rating) setRating(response.rating)
+          if (response.reviewCount) setReviewCount(response.reviewCount)
+          const fetchedReviews = response.reviews || []
+          setReviews(fetchedReviews)
+          if (fetchedReviews.length > 0) {
+            runModelAnalysis(fetchedReviews, apiUrl)
+          } else {
+            setIsAnalyzing(false)
+          }
+          setIsScraping(false)
+        } else {
+          // Fallback storage check
           setTimeout(() => {
             chrome.storage.local.get(
               ["currentProduct", "currentSite", "rating", "reviewCount", "reviews"],
               (result) => {
-                setProduct(result.currentProduct || "No Product Found")
-                setSite(result.currentSite || "Unknown Site")
-                setRating(result.rating || "N/A")
-                setReviewCount(result.reviewCount || "0")
+                const storedProd = result.currentProduct || "No Product Found"
+                setProduct(cleanProductName(storedProd))
+                if (result.currentSite) setSite(result.currentSite)
+                if (result.rating) setRating(result.rating)
+                if (result.reviewCount) setReviewCount(result.reviewCount)
                 const fetchedReviews = result.reviews || []
                 setReviews(fetchedReviews)
-                
+
                 if (fetchedReviews.length > 0) {
                   runModelAnalysis(fetchedReviews, apiUrl)
                 } else {
@@ -176,7 +270,65 @@ function IndexPopup() {
                 setIsScraping(false)
               }
             )
-          }, 1200)
+          }, 600)
+        }
+      })
+    })
+  }
+
+  // Auto-scroll Amazon page down to customer reviews section to trigger lazy loading
+  const handleScrollToReviews = () => {
+    if (typeof chrome === "undefined" || !chrome.tabs) return
+    setIsScraping(true)
+    setIsAnalyzing(true)
+
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const activeTab = tabs?.[0]
+      if (activeTab?.id) {
+        chrome.tabs.sendMessage(activeTab.id, { action: "scrollToReviews" }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn("[DeceptiScan] Scroll message error:", chrome.runtime.lastError.message)
+          }
+
+          if (response && response.status === "no_product") {
+            setProduct("No Product Found")
+            setReviews([])
+            setModelResult(null)
+            setIsScraping(false)
+            setIsAnalyzing(false)
+            return
+          }
+
+          if (response && response.product && response.product !== "No Product Found") {
+            const cleanName = cleanProductName(response.product)
+            setProduct(cleanName)
+            if (response.rating) setRating(response.rating)
+            if (response.reviewCount) setReviewCount(response.reviewCount)
+            const fetchedReviews = response.reviews || []
+            setReviews(fetchedReviews)
+            if (fetchedReviews.length > 0) {
+              runModelAnalysis(fetchedReviews, apiUrl)
+            } else {
+              setIsAnalyzing(false)
+            }
+            setIsScraping(false)
+          } else {
+            setTimeout(() => {
+              chrome.storage.local.get(
+                ["currentProduct", "rating", "reviewCount", "reviews"],
+                (result) => {
+                  const fetchedReviews = result.reviews || []
+                  setReviews(fetchedReviews)
+                  if (fetchedReviews.length > 0) {
+                    runModelAnalysis(fetchedReviews, apiUrl)
+                  } else {
+                    setIsAnalyzing(false)
+                  }
+                  setIsScraping(false)
+                }
+              )
+            }, 1000)
+          }
         })
       } else {
         setIsScraping(false)
@@ -185,7 +337,7 @@ function IndexPopup() {
     })
   }
 
-  // Load settings and data from local storage
+  // Load settings and active tab data from local storage
   useEffect(() => {
     try {
       if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
@@ -194,39 +346,50 @@ function IndexPopup() {
         return
       }
 
-      chrome.storage.local.get(
-        ["currentProduct", "currentSite", "rating", "reviewCount", "reviews", "apiUrl", "themeMode"],
-        (result) => {
-          if (chrome.runtime.lastError) {
-            console.error(chrome.runtime.lastError)
-            return
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const activeTab = tabs?.[0]
+        const url = activeTab?.url || ""
+        const isSupportedShoppingSite = url.includes("amazon.") || url.includes("myntra.com")
+
+        chrome.storage.local.get(
+          ["currentProduct", "currentSite", "rating", "reviewCount", "reviews", "apiUrl", "themeMode"],
+          (result) => {
+            if (chrome.runtime.lastError) {
+              console.error(chrome.runtime.lastError)
+              return
+            }
+
+            const savedUrl = result.apiUrl || "http://127.0.0.1:8000"
+            setApiUrl(savedUrl)
+            checkConnection(savedUrl)
+
+            const savedTheme = result.themeMode || "dark"
+            setThemeMode(savedTheme)
+
+            // If active tab is definitely NOT a supported shopping site (e.g. google.com, youtube, reddit, blank)
+            if (activeTab && url && !isSupportedShoppingSite) {
+              setProduct("No Product Found")
+              setSite("Unknown Site")
+              setRating("N/A")
+              setReviewCount("0")
+              setReviews([])
+              setModelResult(null)
+              return
+            }
+
+            // On Amazon or shopping tabs, immediately trigger scrape to get live data from the tab
+            handleReload()
           }
+        )
+      })
 
-          const savedUrl = result.apiUrl || "http://127.0.0.1:8000"
-          setApiUrl(savedUrl)
-          checkConnection(savedUrl)
-
-          const savedTheme = result.themeMode || "dark"
-          setThemeMode(savedTheme)
-
-          setProduct(result.currentProduct || "No Product Found")
-          setSite(result.currentSite || "Unknown Site")
-          setRating(result.rating || "N/A")
-          setReviewCount(result.reviewCount || "0")
-
-          const fetchedReviews = result.reviews || []
-          setReviews(fetchedReviews)
-
-          if (fetchedReviews.length > 0) {
-            runModelAnalysis(fetchedReviews, savedUrl)
-          }
-        }
-      )
-
-      // Listen for updates dynamically as user scrolls
+      // Listen for updates dynamically as user scrolls or navigates
       const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
         if (areaName === "local") {
-          if (changes.currentProduct) setProduct(changes.currentProduct.newValue || "No Product Found")
+          if (changes.currentProduct) {
+            const raw = changes.currentProduct.newValue || "No Product Found"
+            setProduct(cleanProductName(raw))
+          }
           if (changes.currentSite) setSite(changes.currentSite.newValue || "Unknown Site")
           if (changes.rating) setRating(changes.rating.newValue || "N/A")
           if (changes.reviewCount) setReviewCount(changes.reviewCount.newValue || "0")
@@ -235,7 +398,6 @@ function IndexPopup() {
             const newReviews = changes.reviews.newValue || []
             setReviews(newReviews)
             
-            // Re-fetch custom apiUrl config to ensure consistency
             chrome.storage.local.get(["apiUrl"], (res) => {
               const activeUrl = res.apiUrl || "http://127.0.0.1:8000"
               if (newReviews.length > 0) {
@@ -262,8 +424,39 @@ function IndexPopup() {
 
   // Compute active variables
   const isAiActive = modelResult?.isAiPowered && !isAnalyzing
-  const score = isAiActive ? modelResult.score : heuristicResult.score
-  const risk = isAiActive ? modelResult.risk : heuristicResult.risk
+
+  const isGenericSiteTitle = (name: string) => {
+    const lower = name.toLowerCase()
+    return (
+      lower.includes("online shopping site") ||
+      lower.includes("spend less. smile more") ||
+      lower === "amazon.in" ||
+      lower === "amazon.com" ||
+      lower === "amazon.co.uk" ||
+      lower === "amazon" ||
+      lower.startsWith("amazon.in: online shopping") ||
+      lower.startsWith("amazon.com: online shopping")
+    )
+  }
+
+  const hasProduct = Boolean(
+    product &&
+    product.trim().length > 0 &&
+    product !== "No Product Found" &&
+    product !== "Loading Product..." &&
+    product !== "Unknown Site" &&
+    product !== "Unknown Product" &&
+    !isGenericSiteTitle(product)
+  )
+  const hasReviews = Boolean(reviews && reviews.length > 0)
+
+  // When there is no product, do not compute or show any Trust Score
+  const score = hasProduct
+    ? (isAiActive ? modelResult.score : (hasReviews ? heuristicResult.score : null))
+    : null
+  const risk = hasProduct
+    ? (isAiActive ? modelResult.risk : (hasReviews ? heuristicResult.risk : "Awaiting Reviews"))
+    : "No Product Detected"
 
   const getRiskStyles = (riskLevel: string) => {
     const isDark = themeMode === "dark"
@@ -280,6 +473,13 @@ function IndexPopup() {
           bg: isDark ? "rgba(245, 158, 11, 0.15)" : "rgba(245, 158, 11, 0.08)", 
           text: isDark ? "#FDE047" : "#78350F" 
         }
+      case "Awaiting Reviews":
+      case "No Product Detected":
+        return {
+          color: theme.textSecondary,
+          bg: isDark ? "rgba(148, 163, 184, 0.12)" : "rgba(148, 163, 184, 0.15)",
+          text: isDark ? "#94A3B8" : "#475569"
+        }
       case "Low Risk":
       default:
         return { 
@@ -293,8 +493,8 @@ function IndexPopup() {
   const styles = getRiskStyles(risk)
 
   // Signals list computation
-  const displaySignals = [...heuristicResult.signals]
-  if (isAiActive && modelResult) {
+  const displaySignals = hasReviews ? [...heuristicResult.signals] : []
+  if (hasProduct && isAiActive && modelResult) {
     if (modelResult.fakeCount > 0) {
       displaySignals.unshift(`${modelResult.fakeCount} review(s) flagged as suspicious by DeBERTa-v3 AI model`)
     } else {
@@ -311,11 +511,13 @@ function IndexPopup() {
 
   // Save new URL to storage
   const handleSaveSettings = () => {
+    const cleanUrl = normalizeUrl(apiUrl)
+    setApiUrl(cleanUrl)
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ apiUrl }, () => {
-        checkConnection(apiUrl)
+      chrome.storage.local.set({ apiUrl: cleanUrl }, () => {
+        checkConnection(cleanUrl)
         if (reviews.length > 0) {
-          runModelAnalysis(reviews, apiUrl)
+          runModelAnalysis(reviews, cleanUrl)
         }
       })
     }
@@ -456,221 +658,461 @@ function IndexPopup() {
         {/* TAB 1: OVERVIEW */}
         {activeTab === "overview" && (
           <div style={{ animation: "fadeIn 0.25s ease-out", display: "flex", flexDirection: "column", gap: "16px" }}>
-            {/* Sizing & Guidance Alert */}
-            {reviews.length === 0 && (
+            {!hasProduct ? (
               <div
                 style={{
-                  background: "rgba(59, 130, 246, 0.1)",
-                  border: "1px solid rgba(59, 130, 246, 0.2)",
-                  borderRadius: "12px",
-                  padding: "12px 14px",
-                  color: themeMode === "dark" ? "#93C5FD" : "#1E40AF",
-                  fontSize: "12px",
-                  lineHeight: 1.4,
+                  background: theme.cardBg,
+                  border: theme.border,
+                  borderRadius: "16px",
+                  padding: "40px 24px",
+                  textAlign: "center",
                   display: "flex",
-                  gap: "8px",
-                  alignItems: "flex-start"
-                }}
-              >
-                <AlertTriangle size={16} color={themeMode === "dark" ? "#60A5FA" : "#2563EB"} style={{ flexShrink: 0, marginTop: "1px" }} />
-                <div>
-                  <strong>No reviews scraped yet.</strong> Scroll down the Amazon page to load customer reviews, or click the reload button 🔄 above.
-                </div>
-              </div>
-            )}
-
-            {/* Gauge Score Card */}
-            <div
-              style={{
-                background: theme.cardBg,
-                border: theme.border,
-                borderRadius: "16px",
-                padding: "20px",
-                textAlign: "center",
-                position: "relative",
-                transition: "background 0.3s ease"
-              }}
-            >
-              {isAnalyzing ? (
-                <div
-                  style={{
-                    width: "100px",
-                    height: "100px",
-                    borderRadius: "50%",
-                    border: "6px solid rgba(255,255,255,0.03)",
-                    borderTop: `6px solid ${theme.teal}`,
-                    display: "flex",
-                    justifyContent: "center",
-                    alignItems: "center",
-                    margin: "0 auto 16px auto",
-                    animation: "spin 1s linear infinite"
-                  }}
-                >
-                  <Cpu size={24} color={theme.teal} style={{ animation: "pulse 1.5s infinite" }} />
-                </div>
-              ) : (
-                <div
-                  style={{
-                    width: "100px",
-                    height: "100px",
-                    borderRadius: "50%",
-                    border: `6px solid ${styles.color}`,
-                    boxShadow: themeMode === "dark" ? `inset 0 0 10px ${styles.color}18, 0 0 10px ${styles.color}0c` : "none",
-                    display: "flex",
-                    justifyContent: "center",
-                    alignItems: "center",
-                    margin: "0 auto 16px auto",
-                    transition: "all 0.3s ease"
-                  }}
-                >
-                  <span style={{ fontSize: "34px", fontWeight: 800, color: styles.color }}>
-                    {score}%
-                  </span>
-                </div>
-              )}
-
-              <h3 style={{ fontSize: "13px", color: theme.textSecondary, fontWeight: 500, margin: "0 0 8px 0" }}>
-                Product Trust Score
-              </h3>
-
-              <div
-                style={{
-                  display: "inline-flex",
+                  flexDirection: "column",
                   alignItems: "center",
-                  padding: "4px 14px",
-                  borderRadius: "999px",
-                  background: styles.bg,
-                  color: styles.text,
-                  fontSize: "12px",
-                  fontWeight: 700,
-                  letterSpacing: "0.2px",
-                  transition: "all 0.3s ease"
+                  gap: "16px",
+                  transition: "background 0.3s ease"
                 }}
               >
-                {risk}
-              </div>
-
-              {/* Quick AI Backup warning */}
-              {!isAiActive && (
                 <div
                   style={{
-                    fontSize: "10px",
-                    color: theme.amber,
-                    marginTop: "10px",
+                    width: "60px",
+                    height: "60px",
+                    borderRadius: "50%",
+                    background: themeMode === "dark" ? "rgba(148, 163, 184, 0.1)" : "rgba(148, 163, 184, 0.15)",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    gap: "4px"
+                    color: theme.textSecondary
                   }}
                 >
-                  <ServerCrash size={11} />
-                  <span>Rule-based fallback (API Server offline)</span>
+                  <Search size={28} />
                 </div>
-              )}
-            </div>
 
-            {/* Product Meta Card */}
-            <div
-              style={{
-                background: theme.cardBg,
-                border: theme.border,
-                borderRadius: "16px",
-                padding: "16px",
-                transition: "background 0.3s ease"
-              }}
-            >
-              <span style={{ fontSize: "10px", textTransform: "uppercase", color: theme.teal, fontWeight: 700, letterSpacing: "0.5px" }}>
-                {site} Product
-              </span>
-              <div
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  margin: "6px 0 12px 0",
-                  lineHeight: 1.4,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis"
-                }}
-                title={product}
-              >
-                {product}
-              </div>
+                <div>
+                  <h3 style={{ fontSize: "16px", fontWeight: 700, margin: "0 0 6px 0", color: theme.textPrimary }}>
+                    No Product Detected
+                  </h3>
+                  <p style={{ fontSize: "12px", color: theme.textSecondary, margin: 0, lineHeight: 1.5, maxWidth: "270px" }}>
+                    Navigate to an Amazon product listing page to scan customer reviews and compute the Trust Score.
+                  </p>
+                </div>
 
-              {/* Stats Metrics Grid */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
-                <div style={{ background: themeMode === "dark" ? "rgba(15, 23, 42, 0.3)" : "rgba(255,255,255,0.4)", padding: "10px", borderRadius: "10px", border: theme.border }}>
-                  <div style={{ fontSize: "9px", color: theme.textSecondary, marginBottom: "4px" }}>Rating</div>
-                  <div style={{ fontSize: "12px", fontWeight: 700 }}>⭐ {rating.split(" ")[0]}</div>
+                <div
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    padding: "6px 12px",
+                    borderRadius: "8px",
+                    background: themeMode === "dark" ? "rgba(13, 148, 136, 0.1)" : "rgba(13, 148, 136, 0.08)",
+                    border: `1px solid ${themeMode === "dark" ? "rgba(13, 148, 136, 0.2)" : "rgba(13, 148, 136, 0.15)"}`,
+                    color: theme.teal,
+                    fontSize: "11px",
+                    fontWeight: 600
+                  }}
+                >
+                  <span>Supported: Amazon product listings (/dp/...)</span>
                 </div>
-                <div style={{ background: themeMode === "dark" ? "rgba(15, 23, 42, 0.3)" : "rgba(255,255,255,0.4)", padding: "10px", borderRadius: "10px", border: theme.border }}>
-                  <div style={{ fontSize: "9px", color: theme.textSecondary, marginBottom: "4px" }}>Reviews</div>
-                  <div style={{ fontSize: "12px", fontWeight: 700 }}>📝 {reviewCount.split(" ")[0]}</div>
-                </div>
-                <div style={{ background: themeMode === "dark" ? "rgba(15, 23, 42, 0.3)" : "rgba(255,255,255,0.4)", padding: "10px", borderRadius: "10px", border: theme.border }}>
-                  <div style={{ fontSize: "9px", color: theme.textSecondary, marginBottom: "4px" }}>Scraped</div>
-                  <div style={{ fontSize: "12px", fontWeight: 700 }}>🤖 {reviews.length}</div>
-                </div>
+
+                <button
+                  onClick={handleReload}
+                  disabled={isScraping}
+                  style={{
+                    background: themeMode === "dark" ? "rgba(255, 255, 255, 0.06)" : "rgba(0, 0, 0, 0.05)",
+                    border: theme.border,
+                    color: theme.textPrimary,
+                    borderRadius: "8px",
+                    padding: "8px 16px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    marginTop: "4px",
+                    transition: "all 0.2s"
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = themeMode === "dark" ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.08)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = themeMode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.05)")}
+                >
+                  <RefreshCw size={12} style={{ animation: isScraping ? "spin 1s linear infinite" : "none" }} />
+                  Scan Current Tab
+                </button>
               </div>
-            </div>
+            ) : (
+              <>
+                {/* Sizing & Guidance Alert */}
+                {reviews.length === 0 && (
+                  <div
+                    style={{
+                      background: "rgba(59, 130, 246, 0.1)",
+                      border: "1px solid rgba(59, 130, 246, 0.2)",
+                      borderRadius: "12px",
+                      padding: "12px 14px",
+                      color: themeMode === "dark" ? "#93C5FD" : "#1E40AF",
+                      fontSize: "12px",
+                      lineHeight: 1.4,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "10px"
+                    }}
+                  >
+                    <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
+                      <AlertTriangle size={16} color={themeMode === "dark" ? "#60A5FA" : "#2563EB"} style={{ flexShrink: 0, marginTop: "1px" }} />
+                      <div>
+                        <strong>Customer reviews not loaded in DOM yet.</strong> Amazon lazily loads reviews when scrolled into view.
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginLeft: "24px" }}>
+                      <button
+                        onClick={handleScrollToReviews}
+                        disabled={isScraping}
+                        style={{
+                          background: theme.teal,
+                          color: "#FFFFFF",
+                          border: "none",
+                          borderRadius: "6px",
+                          padding: "6px 10px",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "5px"
+                        }}
+                      >
+                        <RefreshCw size={11} style={{ animation: isScraping ? "spin 1s linear infinite" : "none" }} />
+                        Auto-Scroll & Scrape
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Gauge Score Card */}
+                <div
+                  style={{
+                    background: theme.cardBg,
+                    border: theme.border,
+                    borderRadius: "16px",
+                    padding: "20px",
+                    textAlign: "center",
+                    position: "relative",
+                    transition: "background 0.3s ease"
+                  }}
+                >
+                  {isAnalyzing ? (
+                    <div
+                      style={{
+                        width: "100px",
+                        height: "100px",
+                        borderRadius: "50%",
+                        border: "6px solid rgba(255,255,255,0.03)",
+                        borderTop: `6px solid ${theme.teal}`,
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        margin: "0 auto 16px auto",
+                        animation: "spin 1s linear infinite"
+                      }}
+                    >
+                      <Cpu size={24} color={theme.teal} style={{ animation: "pulse 1.5s infinite" }} />
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        width: "100px",
+                        height: "100px",
+                        borderRadius: "50%",
+                        border: `6px solid ${score !== null ? styles.color : theme.textSecondary}`,
+                        boxShadow: score !== null && themeMode === "dark" ? `inset 0 0 10px ${styles.color}18, 0 0 10px ${styles.color}0c` : "none",
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        margin: "0 auto 16px auto",
+                        transition: "all 0.3s ease"
+                      }}
+                    >
+                      {score !== null ? (
+                        <span style={{ fontSize: "34px", fontWeight: 800, color: styles.color }}>
+                          {score}%
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: "28px", fontWeight: 700, color: theme.textSecondary }}>
+                          --
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  <h3 style={{ fontSize: "13px", color: theme.textSecondary, fontWeight: 500, margin: "0 0 8px 0" }}>
+                    Product Trust Score
+                  </h3>
+
+                  <div
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      padding: "4px 14px",
+                      borderRadius: "999px",
+                      background: styles.bg,
+                      color: styles.text,
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      letterSpacing: "0.2px",
+                      transition: "all 0.3s ease"
+                    }}
+                  >
+                    {risk}
+                  </div>
+
+                  {/* Dynamic AI / Analysis / Offline Status Indicator */}
+                  {isAnalyzing ? (
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: theme.teal,
+                        marginTop: "10px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "6px"
+                      }}
+                    >
+                      <RefreshCw size={12} style={{ animation: "spin 1s linear infinite" }} />
+                      <span>Analyzing with DeBERTa-v3 AI...</span>
+                    </div>
+                  ) : isAiActive ? (
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: "#10B981",
+                        marginTop: "10px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "5px"
+                      }}
+                    >
+                      <CheckCircle2 size={12} color="#10B981" />
+                      <span>DeBERTa-v3 AI Verified</span>
+                    </div>
+                  ) : reviews.length === 0 ? (
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: theme.textSecondary,
+                        marginTop: "10px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "5px"
+                      }}
+                    >
+                      <Cpu size={12} color={theme.textSecondary} />
+                      <span>Click "Auto-Scroll & Scrape" to scan reviews</span>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: theme.amber,
+                        marginTop: "10px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "5px"
+                      }}
+                    >
+                      <ServerCrash size={12} color={theme.amber} />
+                      <span>Rule-based fallback (API Server offline)</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Product Meta Card */}
+                <div
+                  style={{
+                    background: theme.cardBg,
+                    border: theme.border,
+                    borderRadius: "16px",
+                    padding: "16px",
+                    transition: "background 0.3s ease"
+                  }}
+                >
+                  <span style={{ fontSize: "10px", textTransform: "uppercase", color: theme.teal, fontWeight: 700, letterSpacing: "0.5px" }}>
+                    {site} Product
+                  </span>
+                  <div
+                    style={{
+                      fontSize: "14px",
+                      fontWeight: 600,
+                      margin: "6px 0 12px 0",
+                      lineHeight: 1.4,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis"
+                    }}
+                    title={product}
+                  >
+                    {product}
+                  </div>
+
+                  {/* Stats Metrics Grid */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
+                    <div style={{ background: themeMode === "dark" ? "rgba(15, 23, 42, 0.3)" : "rgba(255,255,255,0.4)", padding: "10px", borderRadius: "10px", border: theme.border }}>
+                      <div style={{ fontSize: "9px", color: theme.textSecondary, marginBottom: "4px" }}>Rating</div>
+                      <div style={{ fontSize: "12px", fontWeight: 700 }}>⭐ {rating.split(" ")[0]}</div>
+                    </div>
+                    <div style={{ background: themeMode === "dark" ? "rgba(15, 23, 42, 0.3)" : "rgba(255,255,255,0.4)", padding: "10px", borderRadius: "10px", border: theme.border }}>
+                      <div style={{ fontSize: "9px", color: theme.textSecondary, marginBottom: "4px" }}>Reviews</div>
+                      <div style={{ fontSize: "12px", fontWeight: 700 }}>📝 {reviewCount.split(" ")[0]}</div>
+                    </div>
+                    <div style={{ background: themeMode === "dark" ? "rgba(15, 23, 42, 0.3)" : "rgba(255,255,255,0.4)", padding: "10px", borderRadius: "10px", border: theme.border }}>
+                      <div style={{ fontSize: "9px", color: theme.textSecondary, marginBottom: "4px" }}>Scraped</div>
+                      <div style={{ fontSize: "12px", fontWeight: 700 }}>🤖 {reviews.length}</div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 
         {/* TAB 2: DETAILED REVIEWS LIST */}
         {activeTab === "reviews" && (
           <div style={{ animation: "fadeIn 0.25s ease-out", display: "flex", flexDirection: "column", gap: "12px", height: "100%" }}>
-            
-            {/* Filter Bar */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: "12px", color: theme.textSecondary }}>
-                Showing {filteredDetails.length} of {modelResult?.details?.length || 0} reviews
-              </span>
+            {!hasProduct ? (
+              <div style={{ textAlign: "center", padding: "48px 16px", color: theme.textSecondary }}>
+                <Search size={28} style={{ marginBottom: "12px", opacity: 0.6 }} />
+                <div style={{ fontSize: "13px", fontWeight: 600, color: theme.textPrimary }}>No Product Detected</div>
+                <p style={{ fontSize: "11px", margin: "6px 0 0 0" }}>Open an Amazon product page to view predicted review details.</p>
+              </div>
+            ) : (
+              <>
+                {/* Filter Bar */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: "12px", color: theme.textSecondary }}>
+                    Showing {filteredDetails.length} of {modelResult?.details?.length || 0} reviews
+                  </span>
 
-              <select
-                value={reviewsFilter}
-                onChange={(e) => setReviewsFilter(e.target.value as any)}
-                style={{
-                  background: theme.inputBg,
-                  color: theme.textPrimary,
-                  border: "1px solid rgba(128,128,128,0.2)",
-                  borderRadius: "6px",
-                  padding: "4px 8px",
-                  fontSize: "11px",
-                  outline: "none",
-                  cursor: "pointer"
-                }}
-              >
-                <option value="all">All Predictions</option>
-                <option value="fake">Fake Only</option>
-                <option value="genuine">Genuine Only</option>
-              </select>
-            </div>
+                  <select
+                    value={reviewsFilter}
+                    onChange={(e) => setReviewsFilter(e.target.value as any)}
+                    style={{
+                      background: theme.inputBg,
+                      color: theme.textPrimary,
+                      border: "1px solid rgba(128,128,128,0.2)",
+                      borderRadius: "6px",
+                      padding: "4px 8px",
+                      fontSize: "11px",
+                      outline: "none",
+                      cursor: "pointer"
+                    }}
+                  >
+                    <option value="all">All Predictions</option>
+                    <option value="fake">Fake Only</option>
+                    <option value="genuine">Genuine Only</option>
+                  </select>
+                </div>
 
-            {/* List */}
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "10px",
-                maxHeight: "360px",
-                overflowY: "auto",
-                paddingRight: "4px"
-              }}
-            >
-              {!modelResult?.isAiPowered && !isAnalyzing ? (
-                <div style={{ textAlign: "center", padding: "40px 10px", color: theme.textSecondary }}>
-                  <ServerCrash size={28} color={theme.amber} style={{ marginBottom: "12px" }} />
-                  <div style={{ fontSize: "13px", fontWeight: 600 }}>Review details unavailable.</div>
-                  <p style={{ fontSize: "11px", margin: "6px 0 0 0" }}>Start the FastAPI server and reload page data to request AI labels.</p>
+                {/* List */}
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                    maxHeight: "360px",
+                    overflowY: "auto",
+                    paddingRight: "4px"
+                  }}
+                >
+                  {!modelResult?.isAiPowered && !isAnalyzing ? (
+                    <div style={{ textAlign: "center", padding: "40px 10px", color: theme.textSecondary }}>
+                      <ServerCrash size={28} color={theme.amber} style={{ marginBottom: "12px" }} />
+                      <div style={{ fontSize: "13px", fontWeight: 600 }}>Review details unavailable.</div>
+                      <p style={{ fontSize: "11px", margin: "6px 0 0 0" }}>Start the FastAPI server and reload page data to request AI labels.</p>
+                    </div>
+                  ) : filteredDetails.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "40px 10px", color: theme.textSecondary }}>
+                      No matching reviews found.
+                    </div>
+                  ) : (
+                    filteredDetails.map((item, index) => {
+                      const percent = Math.round(item.confidence * 100)
+                      return (
+                        <div
+                          key={index}
+                          style={{
+                            background: theme.cardBg,
+                            border: theme.border,
+                            borderRadius: "10px",
+                            padding: "12px",
+                            transition: "background 0.3s ease"
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
+                            <span
+                              style={{
+                                fontSize: "10px",
+                                fontWeight: 700,
+                                color: item.is_fake ? theme.red : theme.teal,
+                                background: item.is_fake ? "rgba(239, 68, 68, 0.1)" : "rgba(13, 148, 136, 0.1)",
+                                padding: "2px 6px",
+                                borderRadius: "4px",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "4px"
+                              }}
+                            >
+                              {item.is_fake ? (
+                                <>
+                                  <XCircle size={10} />
+                                  <span>Suspicious ({percent}%)</span>
+                                </>
+                              ) : (
+                                <>
+                                  <CheckCircle2 size={10} />
+                                  <span>Trustworthy ({percent}%)</span>
+                                </>
+                              )}
+                            </span>
+                            
+                            <span style={{ fontSize: "9px", color: theme.textSecondary }}>
+                              #{index + 1}
+                            </span>
+                          </div>
+
+                          <p style={{ margin: 0, fontSize: "11.5px", color: themeMode === "dark" ? "#CBD5E1" : "#334155", lineHeight: 1.4 }}>
+                            "{item.text}"
+                          </p>
+                        </div>
+                      )
+                    })
+                  )}
                 </div>
-              ) : filteredDetails.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "40px 10px", color: theme.textSecondary }}>
-                  No matching reviews found.
-                </div>
-              ) : (
-                filteredDetails.map((item, index) => {
-                  const percent = Math.round(item.confidence * 100)
-                  return (
+              </>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: HEURISTIC SIGNALS */}
+        {activeTab === "signals" && (
+          <div style={{ animation: "fadeIn 0.25s ease-out", display: "flex", flexDirection: "column", gap: "12px" }}>
+            {!hasProduct ? (
+              <div style={{ textAlign: "center", padding: "48px 16px", color: theme.textSecondary }}>
+                <CheckCircle2 size={28} color={theme.teal} style={{ marginBottom: "12px" }} />
+                <div style={{ fontSize: "13px", fontWeight: 600, color: theme.textPrimary }}>No Product Active</div>
+                <p style={{ fontSize: "11px", margin: "6px 0 0 0" }}>Navigate to an Amazon product listing to detect suspicious patterns.</p>
+              </div>
+            ) : (
+              <>
+                <h3 style={{ fontSize: "14px", fontWeight: 600, margin: "0 0 4px 0", color: theme.textPrimary }}>
+                  Anomalies Detected
+                </h3>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {displaySignals.map((signal, index) => (
                     <div
                       key={index}
                       style={{
@@ -678,79 +1120,19 @@ function IndexPopup() {
                         border: theme.border,
                         borderRadius: "10px",
                         padding: "12px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "10px",
                         transition: "background 0.3s ease"
                       }}
                     >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
-                        <span
-                          style={{
-                            fontSize: "10px",
-                            fontWeight: 700,
-                            color: item.is_fake ? theme.red : theme.teal,
-                            background: item.is_fake ? "rgba(239, 68, 68, 0.1)" : "rgba(13, 148, 136, 0.1)",
-                            padding: "2px 6px",
-                            borderRadius: "4px",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "4px"
-                          }}
-                        >
-                          {item.is_fake ? (
-                            <>
-                              <XCircle size={10} />
-                              <span>Suspicious ({percent}%)</span>
-                            </>
-                          ) : (
-                            <>
-                              <CheckCircle2 size={10} />
-                              <span>Trustworthy ({percent}%)</span>
-                            </>
-                          )}
-                        </span>
-                        
-                        <span style={{ fontSize: "9px", color: theme.textSecondary }}>
-                          #{index + 1}
-                        </span>
-                      </div>
-
-                      <p style={{ margin: 0, fontSize: "11.5px", color: themeMode === "dark" ? "#CBD5E1" : "#334155", lineHeight: 1.4 }}>
-                        "{item.text}"
-                      </p>
+                      <AlertTriangle size={16} color={theme.amber} style={{ flexShrink: 0 }} />
+                      <span style={{ fontSize: "12px", color: themeMode === "dark" ? "#CBD5E1" : "#334155" }}>{signal}</span>
                     </div>
-                  )
-                })
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* TAB 3: HEURISTIC SIGNALS */}
-        {activeTab === "signals" && (
-          <div style={{ animation: "fadeIn 0.25s ease-out", display: "flex", flexDirection: "column", gap: "12px" }}>
-            <h3 style={{ fontSize: "14px", fontWeight: 600, margin: "0 0 4px 0", color: theme.textPrimary }}>
-              Anomalies Detected
-            </h3>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {displaySignals.map((signal, index) => (
-                <div
-                  key={index}
-                  style={{
-                    background: theme.cardBg,
-                    border: theme.border,
-                    borderRadius: "10px",
-                    padding: "12px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "10px",
-                    transition: "background 0.3s ease"
-                  }}
-                >
-                  <AlertTriangle size={16} color={theme.amber} style={{ flexShrink: 0 }} />
-                  <span style={{ fontSize: "12px", color: themeMode === "dark" ? "#CBD5E1" : "#334155" }}>{signal}</span>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </>
+            )}
           </div>
         )}
 
@@ -830,10 +1212,6 @@ function IndexPopup() {
               </div>
             </div>
 
-            {/* Help instructions */}
-            <div style={{ fontSize: "11px", color: theme.textSecondary, lineHeight: 1.4 }}>
-              <strong>Setup Instructions:</strong> Ensure your local python environment is active and running the backend script (`python app/main.py`) before saving.
-            </div>
           </div>
         )}
       </div>

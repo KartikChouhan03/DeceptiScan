@@ -31,21 +31,24 @@ __pycache__/
 .env.*
 
 # =========================
-# Datasets
+# Datasets (Large CSV files ignored, documentation tracked)
 # =========================
-extension/backend/dataset/
-extension/backend/datasets/
+extension/backend/dataset/*.csv
+extension/backend/datasets/*.csv
+!extension/backend/dataset/README.md
 
 # =========================
-# Trained Models / Checkpoints
+# Trained Models / Checkpoints (Heavy weights >100MB ignored, configs/scripts tracked)
 # =========================
-extension/backend/models/
-extension/backend/training/results/
-extension/backend/training/logs/
 *.pt
 *.bin
 *.safetensors
 *.pth
+extension/backend/training/results/*
+!extension/backend/training/results/checkpoint-14332/
+extension/backend/training/results/checkpoint-14332/*
+!extension/backend/training/results/checkpoint-14332/trainer_state.json
+!extension/backend/models/download_model.py
 
 
 # =========================

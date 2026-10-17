@@ -44,18 +44,21 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# Models & Weights
-backend/models/
-backend/training/results/
-backend/training/logs/
+# Models & Weights (Heavy weights ignored, configs/scripts tracked)
 *.pt
 *.bin
 *.safetensors
 *.pth
+backend/training/results/*
+!backend/training/results/checkpoint-14332/
+backend/training/results/checkpoint-14332/*
+!backend/training/results/checkpoint-14332/trainer_state.json
+!backend/models/download_model.py
 
-# Dataset artifacts
-backend/dataset/
-backend/datasets/
+# Dataset artifacts (CSVs ignored, documentation tracked)
+backend/dataset/*.csv
+backend/datasets/*.csv
+!backend/dataset/README.md
 
 
 # Environment

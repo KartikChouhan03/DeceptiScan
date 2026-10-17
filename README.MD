@@ -138,9 +138,11 @@ Follow these instructions to install, build, and run the complete DeceptiScan su
     pip install -r requirements.txt
     ```
 4.  **Download and Place Model Weights**:
-    Since model weights are not uploaded to GitHub due to size limitations, ensure your fine-tuned model folder `deberta-v3-detector` is placed in:
-    `extension/backend/models/deberta-v3-detector/`
-    *(Ensure it contains `model.safetensors`, `config.json`, `tokenizer.json`, etc.)*
+    Since model weights (~738 MB) exceed GitHub's 100 MB single-file upload limit, use the automated downloader or place the weights manually:
+    ```bash
+    python models/download_model.py
+    ```
+    *(This verifies that `model.safetensors`, `config.json`, `tokenizer.json`, etc., are present in `extension/backend/models/deberta-v3-detector/`)*.
 5.  Start the FastAPI Server:
     ```bash
     python app/main.py
@@ -151,17 +153,37 @@ Follow these instructions to install, build, and run the complete DeceptiScan su
 
 ## 📊 Dataset & Model Details
 
-The model was fine-tuned on a merged, deduplicated, and cleaned corpus of e-commerce reviews:
+For detailed data provenance, licensing, and filtration math, see the [Dataset Documentation](extension/backend/dataset/README.md).
 
-*   **Total Labeled Samples**: 72,877
-*   **Training Split**: 57,325 reviews
-*   **Testing Split**: 14,332 reviews
-*   **Primary Architecture**: `DeBERTa-v3` base sequence classifier
+### Data Sources & Labeling
+*   **Kaggle Fake Reviews Corpus (Salminen et al., 2022)**: 40,432 labeled reviews (`CG` = Computer-Generated fake mapped to `1`, `OR` = Original genuine mapped to `0`).
+*   **Cleaned Public Amazon Reviews Corpus**: 32,467 real-world reviews labeled via heuristic flags (`fake_review_product`, `reviewer_classified_fake`, `review_is_removed_by_amazon`).
+*   **Raw Merged Corpus**: 72,877 labeled samples.
 
-### Performance Metrics
-*   **Baseline XGBoost Accuracy**: ~84.2%
-*   **Fine-Tuned DeBERTa-v3 Accuracy**: **~96.8%**
-*   **Average Batch Inference Latency**: ~12ms per review (on CUDA GPU)
+### Dataset Cleaning & Split Accounting (1,220 Record Resolution)
+During text normalization (lowercasing, regex punctuation removal, whitespace collapse), **1,220 noisy records were filtered out**:
+*   14 empty / whitespace-only entries.
+*   220 post-normalization duplicates.
+*   986 extreme short-noise reviews (< 4 words).
+*   **Cleaned Modeling Corpus**: **71,657 reviews** ($72,877 - 1,220 = 71,657$).
+*   **Training Split (80% Stratified)**: **57,325 reviews** (`train.csv`)
+*   **Testing Split (20% Stratified)**: **14,332 reviews** (`test.csv`)
+*   *Reproduce with:* `python training/prepare_dataset.py`
+
+### Verified Performance Benchmarks
+For complete classification reports and confusion matrices, see the [Evaluation Report](extension/backend/training/EVALUATION_REPORT.md).
+
+| Metric | TF-IDF + XGBoost Baseline | Fine-Tuned DeBERTa-v3 | Net Gain |
+|---|---|---|---|
+| **Test Accuracy** | 70.63% | **86.74%** | **+16.11%** |
+| **Test F1 Score** | 76.69% | **89.22%** | **+12.53%** |
+| **Precision (Fake)** | 71.82% | **85.35%** | **+13.53%** |
+| **Recall (Fake)** | 82.27% | **93.45%** | **+11.18%** |
+| **Inference Latency** | < 1 ms | **1.91 ms / review (batch 8)** | Real-Time Capable |
+
+*   **Training Log Evidence**: Checkpoint metrics and full step-by-step logs are preserved in `extension/backend/training/results/checkpoint-14332/trainer_state.json` and `training_metrics.json`.
+*   **Baseline Reproducibility**: `python training/baseline_xgboost.py`
+*   **Latency Benchmark**: `python training/benchmark_latency.py`
 
 ---
 
